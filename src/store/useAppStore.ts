@@ -1,7 +1,8 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import { Problema, PROBLEMAS_OLISP } from '../data/problemas';
+import { PROBLEMAS_OLISP } from '../data/problemas';
 import {
+  Problema,
   ModoApp,
   ProgressoProblema,
   StatusProblema,
@@ -9,15 +10,17 @@ import {
   RespostaSimulado
 } from '../types';
 
+
 interface EstadoSimuladoAtivo {
   questoes: Problema[];
   indiceAtual: number;
-  respostas: Record<string, string>; // problemaId -> resposta do aluno
+  respostas: Record<string, string>; // problemaId -> letra escolhida ('A'|'B'|'C'|'D'|'E')
   marcadas: Record<string, boolean>; // problemaId -> marcada para revisão
   tempoRestanteSegundos: number;
   tempoTotalSegundos: number;
   emAndamento: boolean;
   temposPorQuestao: Record<string, number>;
+  isProvaOficial20: boolean;
 }
 
 interface AppStore {
@@ -26,12 +29,18 @@ interface AppStore {
   setModoAtual: (modo: ModoApp) => void;
   problemaAtivoId: string | null;
   setProblemaAtivoId: (id: string | null) => void;
+  temaFiltroRevisao: string | null;
+  setTemaFiltroRevisao: (tema: string | null) => void;
 
   // Progresso do Aluno
   progresso: Record<string, ProgressoProblema>;
-  atualizarStatusProblema: (id: string, status: StatusProblema) => void;
+  atualizarStatusProblema: (id: string, status: StatusProblema, alternativaEscolhida?: 'A' | 'B' | 'C' | 'D' | 'E') => void;
   salvarNotaProblema: (id: string, nota: string) => void;
   ultimoProblemaEstudadoId: string | null;
+
+  // Resumos Teóricos Revisados
+  resumosRevisados: Record<string, boolean>;
+  toggleResumoRevisado: (id: string) => void;
 
   // Data da Prova
   dataProva: string;
@@ -44,8 +53,9 @@ interface AppStore {
 
   // Simulado em Andamento
   simuladoAtivo: EstadoSimuladoAtivo | null;
-  iniciarSimulado: (qtdQuestoes: number, tempoMinutos: number) => void;
-  salvarRespostaSimulado: (problemaId: string, resposta: string) => void;
+  iniciarSimulado: (qtdQuestoes: number, tempoMinutos: number, isOficial?: boolean) => void;
+  iniciarSimuladoOficial: () => void;
+  salvarRespostaSimulado: (problemaId: string, letra: string) => void;
   toggleMarcadaSimulado: (problemaId: string) => void;
   irParaQuestaoSimulado: (indice: number) => void;
   proximaQuestaoSimulado: () => void;
@@ -54,14 +64,17 @@ interface AppStore {
   finalizarSimulado: () => HistoricoSimulado | null;
   cancelarSimulado: () => void;
 
+  // Estatísticas e Diagnósticos
+  obterTemasComMaisErros: () => string[];
+
   // Limpeza
   resetarProgresso: () => void;
 }
 
-// Data da prova padrão: 7 dias a partir de hoje
+// Data da prova padrão: 2 dias a partir de hoje (contexto de reta final)
 const calcularDataPadrao = () => {
   const data = new Date();
-  data.setDate(data.getDate() + 7);
+  data.setDate(data.getDate() + 2);
   return data.toISOString().split('T')[0];
 };
 
@@ -72,11 +85,24 @@ export const useAppStore = create<AppStore>()(
       setModoAtual: (modo) => set({ modoAtual: modo }),
       problemaAtivoId: null,
       setProblemaAtivoId: (id) => set({ problemaAtivoId: id }),
+      temaFiltroRevisao: null,
+      setTemaFiltroRevisao: (tema) => set({ temaFiltroRevisao: tema }),
 
       progresso: {},
       ultimoProblemaEstudadoId: null,
 
-      atualizarStatusProblema: (id, status) => {
+      resumosRevisados: {},
+      toggleResumoRevisado: (id) => {
+        const atual = get().resumosRevisados[id];
+        set({
+          resumosRevisados: {
+            ...get().resumosRevisados,
+            [id]: !atual
+          }
+        });
+      },
+
+      atualizarStatusProblema: (id, status, alternativaEscolhida) => {
         const atual = get().progresso[id] || {
           status: 'nao_visto',
           vezesRevisado: 0
@@ -89,7 +115,8 @@ export const useAppStore = create<AppStore>()(
               ...atual,
               status,
               ultimaRevisao: new Date().toISOString(),
-              vezesRevisado: (atual.vezesRevisado || 0) + 1
+              vezesRevisado: (atual.vezesRevisado || 0) + 1,
+              ...(alternativaEscolhida ? { ultimaAlternativaEscolhida: alternativaEscolhida } : {})
             }
           }
         });
@@ -120,28 +147,33 @@ export const useAppStore = create<AppStore>()(
 
       simuladoAtivo: null,
 
-      iniciarSimulado: (qtdQuestoes, tempoMinutos) => {
-        // Sorteio equilibrado pelos bimestres
+      iniciarSimulado: (qtdQuestoes, tempoMinutos, isOficial = false) => {
         const b1 = PROBLEMAS_OLISP.filter((p) => p.bimestre === 1);
         const b2 = PROBLEMAS_OLISP.filter((p) => p.bimestre === 2);
         const b3 = PROBLEMAS_OLISP.filter((p) => p.bimestre === 3);
 
         const embaralhar = <T>(arr: T[]): T[] => [...arr].sort(() => Math.random() - 0.5);
 
-        const embaralhadoB1 = embaralhar(b1);
-        const embaralhadoB2 = embaralhar(b2);
-        const embaralhadoB3 = embaralhar(b3);
+        let selecionadas: Problema[] = [];
 
-        const questoesPorBim = Math.floor(qtdQuestoes / 3);
-        const sobra = qtdQuestoes % 3;
+        if (qtdQuestoes >= 20) {
+          // Prova completa de 20 questões cobrindo todos os temas e bimestres equilibrados
+          // Pega aprox 7 de B1, 6 de B2, 7 de B3
+          const selB1 = embaralhar(b1).slice(0, 7);
+          const selB2 = embaralhar(b2).slice(0, 6);
+          const selB3 = embaralhar(b3).slice(0, 7);
+          selecionadas = embaralhar([...selB1, ...selB2, ...selB3]);
+        } else {
+          const porBim = Math.floor(qtdQuestoes / 3);
+          const sobra = qtdQuestoes % 3;
+          selecionadas = embaralhar([
+            ...embaralhar(b1).slice(0, porBim),
+            ...embaralhar(b2).slice(0, porBim),
+            ...embaralhar(b3).slice(0, porBim + sobra)
+          ]);
+        }
 
-        let selecionadas: Problema[] = [
-          ...embaralhadoB1.slice(0, questoesPorBim),
-          ...embaralhadoB2.slice(0, questoesPorBim),
-          ...embaralhadoB3.slice(0, questoesPorBim + sobra)
-        ];
-
-        // Se faltar por algum motivo, completa com qualquer uma restante
+        // Caso falte, completa com qualquer questão restante
         if (selecionadas.length < qtdQuestoes) {
           const restantes = embaralhar(
             PROBLEMAS_OLISP.filter((p) => !selecionadas.some((s) => s.id === p.id))
@@ -149,9 +181,7 @@ export const useAppStore = create<AppStore>()(
           selecionadas = [...selecionadas, ...restantes.slice(0, qtdQuestoes - selecionadas.length)];
         }
 
-        // Embaralha as questões sorteadas
-        selecionadas = embaralhar(selecionadas).slice(0, qtdQuestoes);
-
+        selecionadas = selecionadas.slice(0, qtdQuestoes);
         const tempoTotalSegundos = tempoMinutos * 60;
 
         set({
@@ -163,13 +193,19 @@ export const useAppStore = create<AppStore>()(
             tempoRestanteSegundos: tempoTotalSegundos,
             tempoTotalSegundos: tempoTotalSegundos,
             emAndamento: true,
-            temposPorQuestao: {}
+            temposPorQuestao: {},
+            isProvaOficial20: isOficial || qtdQuestoes === 20
           },
           modoAtual: 'simulado'
         });
       },
 
-      salvarRespostaSimulado: (problemaId, resposta) => {
+      iniciarSimuladoOficial: () => {
+        // Prova oficial exata de 20 questões em 60 minutos
+        get().iniciarSimulado(20, 60, true);
+      },
+
+      salvarRespostaSimulado: (problemaId, letra) => {
         const ativo = get().simuladoAtivo;
         if (!ativo) return;
         set({
@@ -177,7 +213,7 @@ export const useAppStore = create<AppStore>()(
             ...ativo,
             respostas: {
               ...ativo.respostas,
-              [problemaId]: resposta
+              [problemaId]: letra
             }
           }
         });
@@ -238,7 +274,6 @@ export const useAppStore = create<AppStore>()(
         const ativo = get().simuladoAtivo;
         if (!ativo || !ativo.emAndamento) return;
         if (ativo.tempoRestanteSegundos <= 1) {
-          // Finaliza automaticamente ao acabar o tempo
           get().finalizarSimulado();
         } else {
           const questaoAtualId = ativo.questoes[ativo.indiceAtual]?.id;
@@ -265,19 +300,18 @@ export const useAppStore = create<AppStore>()(
         const tempoMedio = Math.round(tempoGastoTotal / Math.max(1, totalQuestoes));
 
         const respostasFormatadas: RespostaSimulado[] = ativo.questoes.map((q) => {
-          const respAluno = (ativo.respostas[q.id] || '').trim();
-          // Avaliação simples de resposta preenchida
-          const acertou = respAluno.length > 5;
+          const respLetra = (ativo.respostas[q.id] || '').toUpperCase();
+          const acertou = respLetra === q.respostaCorreta;
           return {
             problemaId: q.id,
-            respostaAluno: respAluno,
+            respostaAluno: respLetra,
             acertou,
             tempoGastoSegundos: ativo.temposPorQuestao[q.id] || Math.round(tempoMedio),
             marcadaParaRevisao: !!ativo.marcadas[q.id]
           };
         });
 
-        // Desempenho por tema
+        // Atualizar desempenho por tema
         const desempenhoPorTema: Record<string, { total: number; acertos: number }> = {};
         ativo.questoes.forEach((q, idx) => {
           const resp = respostasFormatadas[idx];
@@ -303,10 +337,25 @@ export const useAppStore = create<AppStore>()(
           desempenhoPorTema
         };
 
+        // Atualiza progresso geral dos problemas respondidos no simulado
+        const progressoAtual = { ...get().progresso };
+        ativo.questoes.forEach((q, idx) => {
+          const resp = respostasFormatadas[idx];
+          const anterior = progressoAtual[q.id] || { status: 'nao_visto', vezesRevisado: 0 };
+          progressoAtual[q.id] = {
+            ...anterior,
+            status: resp.acertou ? (anterior.status === 'nao_visto' ? 'dominado' : anterior.status) : 'revisar',
+            ultimaRevisao: new Date().toISOString(),
+            vezesRevisado: (anterior.vezesRevisado || 0) + 1,
+            ultimaAlternativaEscolhida: resp.respostaAluno as any
+          };
+        });
+
         set({
           historicoSimulados: [novoSimulado, ...get().historicoSimulados],
           ultimoSimuladoFinalizado: novoSimulado,
           simuladoAtivo: null,
+          progresso: progressoAtual,
           modoAtual: 'simulado'
         });
 
@@ -317,23 +366,49 @@ export const useAppStore = create<AppStore>()(
         set({ simuladoAtivo: null, modoAtual: 'dashboard' });
       },
 
+      obterTemasComMaisErros: () => {
+        const historico = get().historicoSimulados;
+        const totalPorTema: Record<string, { total: number; erros: number }> = {};
+
+        historico.forEach((sim) => {
+          Object.entries(sim.desempenhoPorTema).forEach(([tema, dados]) => {
+            if (!totalPorTema[tema]) {
+              totalPorTema[tema] = { total: 0, erros: 0 };
+            }
+            totalPorTema[tema].total += dados.total;
+            totalPorTema[tema].erros += (dados.total - dados.acertos);
+          });
+        });
+
+        // Ordena temas pelo maior número de erros / pior taxa
+        return Object.entries(totalPorTema)
+          .sort((a, b) => {
+            const taxaErroA = a[1].total > 0 ? a[1].erros / a[1].total : 0;
+            const taxaErroB = b[1].total > 0 ? b[1].erros / b[1].total : 0;
+            return taxaErroB - taxaErroA || b[1].erros - a[1].erros;
+          })
+          .map(([tema]) => tema);
+      },
+
       resetarProgresso: () => {
         set({
           progresso: {},
           historicoSimulados: [],
           ultimoSimuladoFinalizado: null,
           simuladoAtivo: null,
-          ultimoProblemaEstudadoId: null
+          ultimoProblemaEstudadoId: null,
+          resumosRevisados: {}
         });
       }
     }),
     {
-      name: 'olisp_estudos_store_v1',
+      name: 'olisp_estudos_store_v2',
       partialize: (state) => ({
         progresso: state.progresso,
         ultimoProblemaEstudadoId: state.ultimoProblemaEstudadoId,
         dataProva: state.dataProva,
-        historicoSimulados: state.historicoSimulados
+        historicoSimulados: state.historicoSimulados,
+        resumosRevisados: state.resumosRevisados
       })
     }
   )

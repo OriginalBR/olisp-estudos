@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useAppStore } from './store/useAppStore';
 import { Navbar } from './components/Navbar';
 import { Dashboard } from './components/Dashboard';
+import { ModoEstudoRapido } from './components/ModoEstudoRapido';
 import { ModoRevisao } from './components/ModoRevisao';
 import { ModoSimulado } from './components/ModoSimulado';
 import { Estatisticas } from './components/Estatisticas';
@@ -15,7 +16,7 @@ export const App: React.FC = () => {
   const [isConfigOpen, setIsConfigOpen] = useState(false);
 
   return (
-    <div className="min-h-screen flex flex-col bg-slate-950 text-slate-100 selection:bg-indigo-600 selection:text-white">
+    <div className="min-h-screen flex flex-col bg-slate-950 text-slate-100 selection:bg-indigo-600 selection:text-white font-sans antialiased">
       {/* Barra de Navegação Superior */}
       <Navbar
         onOpenShare={() => setIsShareOpen(true)}
@@ -31,6 +32,8 @@ export const App: React.FC = () => {
           />
         )}
 
+        {modoAtual === 'estudo_rapido' && <ModoEstudoRapido />}
+
         {modoAtual === 'revisao' && <ModoRevisao />}
 
         {modoAtual === 'simulado' && <ModoSimulado />}
@@ -41,12 +44,12 @@ export const App: React.FC = () => {
       </main>
 
       {/* Rodapé Minimalista */}
-      <footer className="border-t border-slate-900 py-6 text-center text-xs text-slate-500 max-w-6xl mx-auto w-full px-4 space-y-1">
-        <p>
+      <footer className="border-t border-slate-900 py-6 text-center text-xs text-slate-500 max-w-6xl mx-auto w-full px-4 space-y-1 mt-auto">
+        <p className="font-semibold text-slate-400">
           OLISP Treino & Revisão • Olimpíada de Linguística de São Paulo • 1ª Série Ensino Médio
         </p>
         <p className="text-[11px] text-slate-600">
-          Base de dados extraída do material didático dos Volumes 1, 2 e 3 (Seduc-SP) • 100% offline & client-side
+          Base de dados extraída e adaptada do material oficial dos Volumes 1, 2 e 3 (Seduc-SP) • 100% offline & client-side
         </p>
       </footer>
 
